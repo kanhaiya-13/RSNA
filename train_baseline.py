@@ -48,9 +48,12 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────
 class Config:
     # ── Paths ──────────────────────────────────
+    # .npz volumes live here (Kaggle dataset: barun2104/rsna-knee-mri-processed-3d-volumes)
     BASE_IMAGE_DIR: str  = "D:/rsna_knee_dataset"
-    TRAIN_CSV:      str  = "train.csv"
-    SERIES_CSV:     str  = "train_series.csv"
+    # Competition CSVs (download from kaggle.com/competitions/rsna-knee-abnormality-detection)
+    # Place train.csv and train_series.csv inside BASE_IMAGE_DIR  -OR-  update these paths.
+    TRAIN_CSV:      str  = "D:/rsna_knee_dataset/train.csv"
+    SERIES_CSV:     str  = "D:/rsna_knee_dataset/train_series.csv"
 
     # ── Labels ─────────────────────────────────
     LABELS: List[str] = [
@@ -114,6 +117,18 @@ def load_gold_metadata(
     df : pd.DataFrame
         Columns: StudyInstanceUID, SeriesInstanceUID, <labels...>
     """
+    # ── Friendly check for missing CSVs ─────────────────────────
+    for csv_path, name in [(train_csv, "train.csv"), (series_csv, "train_series.csv")]:
+        if not os.path.isfile(csv_path):
+            raise FileNotFoundError(
+                f"\n\n[ERROR] Could not find: {csv_path}\n"
+                f"  These CSV files come from the COMPETITION page (not the 3D-volumes dataset).\n"
+                f"  Download them from:\n"
+                f"    https://www.kaggle.com/competitions/rsna-knee-abnormality-detection/data\n"
+                f"  Then place '{name}' at: {csv_path}\n"
+                f"  (or update CFG.TRAIN_CSV / CFG.SERIES_CSV to wherever you saved them)\n"
+            )
+
     train_df  = pd.read_csv(train_csv)
     series_df = pd.read_csv(series_csv)
 
@@ -174,11 +189,20 @@ class KneeMRIDataset(Dataset):
 
     # ────────────────────────────────────────
     def _load_volume(self, series_uid: str) -> np.ndarray:
-        """Load .npz, return float32 array of shape [D, H, W]."""
+        """Load .npz, return float32 array of shape [D, H, W].
+
+        The RSNA processed-3D-volumes dataset stores each volume under
+        the key 'data' with shape (24, 224, 224) and dtype uint8.
+        """
         path = self.base_dir / f"{series_uid}.npz"
         with np.load(path) as f:
-            # Try common key names; fall back to the first key
-            key = "arr_0" if "arr_0" in f else list(f.keys())[0]
+            # Key priority: 'data' (this dataset) -> 'arr_0' -> first key
+            if "data" in f:
+                key = "data"
+            elif "arr_0" in f:
+                key = "arr_0"
+            else:
+                key = list(f.keys())[0]
             vol = f[key].astype(np.float32)   # [D, H, W]
         return vol
 
@@ -195,15 +219,18 @@ class KneeMRIDataset(Dataset):
         """
         Uniformly sample / interpolate along depth axis to FIXED_DEPTH.
         vol : [D, H, W]  ->  output : [FIXED_DEPTH, H, W]
+
+        Fast-path: the RSNA processed dataset already uses D=24, so this
+        is effectively a no-op for that dataset.
         """
         D = vol.shape[0]
         if D == self.fixed_depth:
-            return vol
-        # Uniform index sampling (works for both up- and down-sampling)
+            return vol                             # already correct depth
+        # Uniform linear interpolation (up- or down-sampling)
         indices = np.linspace(0, D - 1, self.fixed_depth)
         lo = np.floor(indices).astype(int)
         hi = np.minimum(lo + 1, D - 1)
-        w  = (indices - lo).astype(np.float32)          # interpolation weight
+        w  = (indices - lo).astype(np.float32)    # interpolation weight
         sampled = (
             vol[lo] * (1.0 - w[:, None, None]) +
             vol[hi] *  w[:, None, None]
@@ -215,15 +242,22 @@ class KneeMRIDataset(Dataset):
         """
         Resize H x W of every slice to (img_h, img_w) using trilinear interp.
         vol  : [D, H, W]  ->  tensor : [D, img_h, img_w]
+
+        Fast-path: the RSNA processed dataset is already 224x224, so
+        interpolation is skipped entirely for speed.
         """
-        t = torch.from_numpy(vol).unsqueeze(0).unsqueeze(0)   # [1,1,D,H,W]
+        D, H, W = vol.shape
+        t = torch.from_numpy(vol)                             # [D, H, W]
+        if H == self.img_h and W == self.img_w:
+            return t                                           # already correct size
+        t = t.unsqueeze(0).unsqueeze(0)                       # [1,1,D,H,W]
         t = F.interpolate(
             t,
-            size=(self.fixed_depth, self.img_h, self.img_w),
+            size=(D, self.img_h, self.img_w),
             mode="trilinear",
             align_corners=False,
         )
-        return t.squeeze(0).squeeze(0)   # [D, img_h, img_w]
+        return t.squeeze(0).squeeze(0)                        # [D, img_h, img_w]
 
     # ────────────────────────────────────────
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
