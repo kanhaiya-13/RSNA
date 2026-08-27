@@ -111,18 +111,19 @@ class Config:
     IMG_HEIGHT:  int = 224
     IMG_WIDTH:   int = 224
 
-    # ── Training (hardware-tuned for i9-13900K + 24 GB GPU) ─────
+    # ── Training ────────────────────────────────
     EPOCHS:          int   = 30
-    BATCH_SIZE:      int   = 8     # ↑ from 4: 24 GB VRAM easily fits B=8 in fp16
+    BATCH_SIZE:      int   = 8     # 24 GB VRAM easily fits B=8 in fp16
     LR:              float = 1e-4
     WEIGHT_DECAY:    float = 1e-2
     ACCUM_STEPS:     int   = 1     # gradient accumulation; effective batch = BATCH_SIZE × ACCUM_STEPS
     N_FOLDS:         int   = 5     # GroupKFold cross-validation splits
     FOLD:            int   = 0     # which fold to train (overridden by --fold)
     SEED:            int   = 42
-    NUM_WORKERS:     int   = 8     # ↑ from 4: i9-13900K has 32 threads
+    NUM_WORKERS:     int   = 4     # 4 workers avoids Windows Pagefile / WinError 1455 bottlenecks
     PREFETCH_FACTOR: int   = 2     # batches pre-fetched per worker
     MIXED_PREC:      bool  = True  # AMP fp16 via autocast + GradScaler
+    COMPILE:         bool  = False # torch.compile (optional flag)
 
     # ── Model ───────────────────────────────────
     BACKBONE:   str  = "resnet34"
@@ -332,6 +333,7 @@ def validate_one_epoch(
     criterion:  nn.Module,
     device:     torch.device,
     has_weight: bool = False,
+    labels:     List[str] = CFG.LABELS,
 ) -> Tuple[float, float, dict]:
     """Run one validation epoch. Returns (val_loss, macro_auc, per_class_auc)."""
     model.eval()
@@ -341,28 +343,28 @@ def validate_one_epoch(
 
     for batch in tqdm(loader, desc="  Val  ", leave=False):
         if has_weight:
-            volumes, labels, weights = batch
+            volumes, labels_batch, weights = batch
             weights = weights.to(device, non_blocking=True)
         else:
-            volumes, labels = batch
+            volumes, labels_batch = batch
             weights = None
 
-        volumes = volumes.to(device, non_blocking=True)
-        labels  = labels.to(device,  non_blocking=True)
+        volumes      = volumes.to(device, non_blocking=True)
+        labels_batch = labels_batch.to(device, non_blocking=True)
 
         with autocast(dtype=torch.float16, enabled=CFG.MIXED_PREC):
             logits = model(volumes)
-            loss   = compute_bce_loss(criterion, logits, labels, weights)
+            loss   = compute_bce_loss(criterion, logits, labels_batch, weights)
 
         probs = torch.sigmoid(logits).cpu().float().numpy()
         all_preds.append(probs)
-        all_targets.append(labels.cpu().float().numpy())
+        all_targets.append(labels_batch.cpu().float().numpy())
         total_loss += loss.item()
 
     val_loss             = total_loss / max(len(loader), 1)
     y_pred               = np.concatenate(all_preds,   axis=0)
     y_true               = np.concatenate(all_targets, axis=0)
-    macro_auc, per_class = compute_macro_auc(y_true, y_pred)
+    macro_auc, per_class = compute_macro_auc(y_true, y_pred, labels=labels)
 
     return val_loss, macro_auc, per_class
 
@@ -379,6 +381,8 @@ def run_training(args: argparse.Namespace) -> None:
     CFG.SEED         = args.seed
     CFG.FOLD         = args.fold
     CFG.ACCUM_STEPS  = args.accum_steps
+    CFG.NUM_WORKERS  = args.num_workers
+    CFG.COMPILE      = args.compile
 
     # ── Device & AMP setup ───────────────────────────────────────
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -406,7 +410,7 @@ def run_training(args: argparse.Namespace) -> None:
     print(f"  Accum steps         : {CFG.ACCUM_STEPS}")
     print(f"  Effective batch     : {eff_batch}")
     print(f"  Fold                : {CFG.FOLD} / {CFG.N_FOLDS}")
-    print(f"  Num workers         : {CFG.NUM_WORKERS}")
+    print(f"  Num workers (train) : {CFG.NUM_WORKERS}")
     print(f"  Prefetch factor     : {CFG.PREFETCH_FACTOR}")
     print(f"  Outputs dir         : {outputs_dir.resolve()}")
     print(f"{'='*65}\n")
@@ -429,17 +433,32 @@ def run_training(args: argparse.Namespace) -> None:
     train_ds = KneeMRIDataset(train_df, augment=True,  **ds_kwargs)
     val_ds   = KneeMRIDataset(val_df,   augment=False, **ds_kwargs)
 
-    loader_kwargs = dict(
-        batch_size            = CFG.BATCH_SIZE,
-        num_workers           = CFG.NUM_WORKERS,
-        pin_memory            = device.type == "cuda",
-        persistent_workers    = CFG.NUM_WORKERS > 0,  # avoid per-epoch worker respawn
-        prefetch_factor       = CFG.PREFETCH_FACTOR if CFG.NUM_WORKERS > 0 else None,
-        # spawn is required on Windows to avoid CUDA fork issues with multiprocessing
-        multiprocessing_context = "spawn" if CFG.NUM_WORKERS > 0 else None,
+    # Note: On Windows, keeping persistent_workers on train_loader and lower workers on
+    # val_loader prevents [WinError 1455] paging file exhaustion.
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=CFG.BATCH_SIZE,
+        shuffle=True,
+        drop_last=True,
+        num_workers=CFG.NUM_WORKERS,
+        pin_memory=device.type == "cuda",
+        persistent_workers=CFG.NUM_WORKERS > 0,
+        prefetch_factor=CFG.PREFETCH_FACTOR if CFG.NUM_WORKERS > 0 else None,
+        multiprocessing_context="spawn" if CFG.NUM_WORKERS > 0 else None,
     )
-    train_loader = DataLoader(train_ds, shuffle=True,  drop_last=True,  **loader_kwargs)
-    val_loader   = DataLoader(val_ds,   shuffle=False, drop_last=False, **loader_kwargs)
+
+    val_workers = min(2, CFG.NUM_WORKERS)
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=CFG.BATCH_SIZE,
+        shuffle=False,
+        drop_last=False,
+        num_workers=val_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=False,
+        prefetch_factor=CFG.PREFETCH_FACTOR if val_workers > 0 else None,
+        multiprocessing_context="spawn" if val_workers > 0 else None,
+    )
 
     print(f"[Loaders] Train batches: {len(train_loader)}  |  Val batches: {len(val_loader)}\n")
 
@@ -456,16 +475,18 @@ def run_training(args: argparse.Namespace) -> None:
         print(f"[Model] Wrapping with DataParallel across {n_gpus} GPUs")
         model = nn.DataParallel(model)
 
-    # ── torch.compile (PyTorch ≥ 2.0) ───────────────────────────
-    # 'reduce-overhead' mode traces the graph once and replays a CUDA graph,
-    # eliminating Python overhead in subsequent steps (~20-40 % speedup).
-    # The first epoch is slower while compilation runs — this is expected.
-    try:
-        print("[Model] Compiling with torch.compile(mode='reduce-overhead') ...")
-        model = torch.compile(model, mode="reduce-overhead")
-        print("[Model] Compilation scheduled  (first epoch will be slower)")
-    except Exception as e:
-        print(f"[Model] torch.compile unavailable ({e}), running in eager mode")
+    # ── torch.compile (Optional) ─────────────────────────────────
+    if CFG.COMPILE:
+        _is_windows = os.name == "nt"
+        _compile_mode    = "default" if _is_windows else "reduce-overhead"
+        _compile_backend = "eager"   if _is_windows else "inductor"
+
+        try:
+            print(f"[Model] Compiling with torch.compile(mode='{_compile_mode}', backend='{_compile_backend}') ...")
+            model = torch.compile(model, mode=_compile_mode, backend=_compile_backend)
+            print("[Model] Compilation scheduled")
+        except Exception as e:
+            print(f"[Model] torch.compile skipped ({type(e).__name__}: {e}), running in eager mode")
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable    = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -590,6 +611,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool_mode",   type=str,   default=CFG.POOL_MODE,
                         choices=["mean", "max"],
                         help="Depth aggregation mode")
+    parser.add_argument("--num_workers",  type=int,   default=CFG.NUM_WORKERS,
+                        help="Number of DataLoader worker processes for training")
+    parser.add_argument("--compile",      action="store_true", default=CFG.COMPILE,
+                        help="Enable torch.compile (optional)")
     parser.add_argument("--fold",        type=int,   default=CFG.FOLD,
                         help=f"Fold index to train (0-indexed, 0-{CFG.N_FOLDS - 1})")
     return parser.parse_args()

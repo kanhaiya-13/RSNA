@@ -7,7 +7,7 @@ Provides ``compute_macro_auc`` — macro-averaged ROC-AUC that is compatible
 with both hard binary labels and soft (continuous) probability targets.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from sklearn.metrics import roc_auc_score
@@ -16,7 +16,7 @@ from sklearn.metrics import roc_auc_score
 def compute_macro_auc(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    labels: List[str],
+    labels: Optional[List[str]] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """
     Compute per-class and macro-averaged ROC-AUC.
@@ -32,8 +32,9 @@ def compute_macro_auc(
         Ground-truth labels (binary or soft probabilities).
     y_pred : np.ndarray  shape [N, num_classes]
         Predicted probabilities (sigmoid-activated logits).
-    labels : list of str
+    labels : list of str, optional
         Human-readable class names, aligned with columns of ``y_true``/``y_pred``.
+        If None, generic names ['class_0', 'class_1', ...] will be used.
 
     Returns
     -------
@@ -43,6 +44,9 @@ def compute_macro_auc(
     per_class : dict {str -> float}
         Per-class AUC values.  ``float('nan')`` for skipped classes.
     """
+    if labels is None:
+        labels = [f"class_{i}" for i in range(y_true.shape[1])]
+
     per_class:  Dict[str, float] = {}
     valid_aucs: List[float]      = []
 
