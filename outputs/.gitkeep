@@ -1,0 +1,2 @@
+# outputs/ — runtime directory for checkpoints and training histories
+# This file exists only to ensure git tracks the empty directory.

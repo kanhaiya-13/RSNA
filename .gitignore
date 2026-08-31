@@ -20,14 +20,14 @@ build/
 .eggs/
 
 # ── Model checkpoints & large binary artifacts ────────────────────────────────
-outputs/
+# outputs/
 *.pt
 *.pth
 *.ckpt
 *.bin
 
 # ── Training histories & experiment logs ──────────────────────────────────────
-training_history*.csv
+# training_history*.csv
 *.log
 
 # ── Jupyter notebooks checkpoints ─────────────────────────────────────────────
