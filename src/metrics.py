@@ -54,15 +54,21 @@ def compute_macro_auc(
         col_true = y_true[:, i]
         col_pred = y_pred[:, i]
 
-        if len(np.unique(col_true)) < 2:
-            # AUC undefined when all ground-truth values are identical
+        # For continuous soft pseudo-labels (floats in [0, 1]), threshold at >= 0.5 for ROC-AUC
+        if col_true.dtype.kind == 'f' and not np.all(np.isin(col_true, [0, 1])):
+            col_true_eval = (col_true >= 0.5).astype(int)
+        else:
+            col_true_eval = col_true.astype(int)
+
+        if len(np.unique(col_true_eval)) < 2:
+            # AUC undefined when only one class is present in split
             per_class[lbl] = float("nan")
             continue
 
         try:
-            auc = roc_auc_score(col_true, col_pred)
-            per_class[lbl] = auc
-            valid_aucs.append(auc)
+            auc = roc_auc_score(col_true_eval, col_pred)
+            per_class[lbl] = float(auc)
+            valid_aucs.append(float(auc))
         except Exception:
             per_class[lbl] = float("nan")
 
