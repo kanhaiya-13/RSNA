@@ -27,16 +27,8 @@ build/
 outputs/*.pt
 outputs/*.pth
 
-# ── Keep the outputs folder & logs tracked ──
-!outputs/
-!outputs/.gitkeep
-!outputs/*.csv
-
-# ── Training histories & experiment logs ──────────────────────────────────────
-# training_history*.csv
+# ── Logs & Checkpoints ────────────────────────────────────────────────────────
 *.log
-
-# ── Jupyter notebooks checkpoints ─────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
 
@@ -44,6 +36,7 @@ outputs/*.pth
 *.npz
 *.npy
 *.csv
+!outputs/*.csv
 !requirements*.txt        # keep requirements CSVs if any
 
 # ── IDE & editor ──────────────────────────────────────────────────────────────
