@@ -275,6 +275,7 @@ def train_one_epoch(
     device:      torch.device,
     has_weight:  bool = False,
     accum_steps: int  = 1,
+    max_batches: Optional[int] = None,
 ) -> float:
     """
     Run one full training epoch with optional gradient accumulation.
@@ -290,9 +291,13 @@ def train_one_epoch(
     model.train()
     total_loss   = 0.0
     accum_steps  = max(accum_steps, 1)
+    num_steps    = min(len(loader), max_batches) if max_batches else len(loader)
     optimizer.zero_grad(set_to_none=True)
 
-    for step, batch in enumerate(tqdm(loader, desc="  Train", leave=False)):
+    for step, batch in enumerate(tqdm(loader, desc="  Train", total=num_steps, leave=False)):
+        if max_batches and step >= max_batches:
+            break
+
         if has_weight:
             volumes, labels, weights = batch
             weights = weights.to(device, non_blocking=True)
@@ -305,8 +310,6 @@ def train_one_epoch(
 
         with autocast(dtype=torch.float16, enabled=CFG.MIXED_PREC):
             logits = model(volumes)                                       # [B, 12]
-            # Scale loss by accum_steps so the gradient magnitude stays
-            # equivalent to a single large-batch update
             loss   = compute_bce_loss(criterion, logits, labels, weights)
             loss   = loss / accum_steps
 
@@ -314,7 +317,7 @@ def train_one_epoch(
         total_loss += loss.item() * accum_steps   # un-scale for logging
 
         # Update weights only after accumulating `accum_steps` mini-batches
-        is_last_batch  = (step + 1) == len(loader)
+        is_last_batch  = (step + 1) == num_steps
         should_update  = ((step + 1) % accum_steps == 0) or is_last_batch
         if should_update:
             scaler.unscale_(optimizer)
@@ -323,25 +326,30 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-    return total_loss / max(len(loader), 1)
+    return total_loss / max(num_steps, 1)
 
 
 @torch.no_grad()
 def validate_one_epoch(
-    model:      nn.Module,
-    loader:     DataLoader,
-    criterion:  nn.Module,
-    device:     torch.device,
-    has_weight: bool = False,
-    labels:     List[str] = CFG.LABELS,
+    model:       nn.Module,
+    loader:      DataLoader,
+    criterion:   nn.Module,
+    device:      torch.device,
+    has_weight:  bool = False,
+    labels:      List[str] = CFG.LABELS,
+    max_batches: Optional[int] = None,
 ) -> Tuple[float, float, dict]:
     """Run one validation epoch. Returns (val_loss, macro_auc, per_class_auc)."""
     model.eval()
     total_loss  = 0.0
     all_preds   = []
     all_targets = []
+    num_steps   = min(len(loader), max_batches) if max_batches else len(loader)
 
-    for batch in tqdm(loader, desc="  Val  ", leave=False):
+    for step, batch in enumerate(tqdm(loader, desc="  Val  ", total=num_steps, leave=False)):
+        if max_batches and step >= max_batches:
+            break
+
         if has_weight:
             volumes, labels_batch, weights = batch
             weights = weights.to(device, non_blocking=True)
@@ -361,7 +369,7 @@ def validate_one_epoch(
         all_targets.append(labels_batch.cpu().float().numpy())
         total_loss += loss.item()
 
-    val_loss             = total_loss / max(len(loader), 1)
+    val_loss             = total_loss / max(num_steps, 1)
     y_pred               = np.concatenate(all_preds,   axis=0)
     y_true               = np.concatenate(all_targets, axis=0)
     macro_auc, per_class = compute_macro_auc(y_true, y_pred, labels=labels)
@@ -513,15 +521,19 @@ def run_training(args: argparse.Namespace) -> None:
     per_class    = {lbl: float("nan") for lbl in CFG.LABELS}
     ckpt_path    = outputs_dir / f"best_model_fold{CFG.FOLD}.pt"
 
+    max_batches = getattr(args, "max_batches", None)
+
     for epoch in range(1, CFG.EPOCHS + 1):
         print(f"Epoch [{epoch:03d}/{CFG.EPOCHS:03d}]  Fold {CFG.FOLD}")
 
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device,
             has_weight=has_weight, accum_steps=CFG.ACCUM_STEPS,
+            max_batches=max_batches,
         )
         val_loss, macro_auc, per_class = validate_one_epoch(
-            model, val_loader, criterion, device, has_weight
+            model, val_loader, criterion, device, has_weight=has_weight,
+            max_batches=max_batches,
         )
         scheduler.step()
 
@@ -617,6 +629,8 @@ def parse_args() -> argparse.Namespace:
                         help="Enable torch.compile (optional)")
     parser.add_argument("--fold",        type=int,   default=CFG.FOLD,
                         help=f"Fold index to train (0-indexed, 0-{CFG.N_FOLDS - 1})")
+    parser.add_argument("--max_batches", type=int,   default=None,
+                        help="Fast verification mode: limit batches per epoch (e.g. 5 for sanity check)")
     return parser.parse_args()
 
 

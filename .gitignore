@@ -20,11 +20,17 @@ build/
 .eggs/
 
 # ── Model checkpoints & large binary artifacts ────────────────────────────────
-# outputs/
 *.pt
 *.pth
 *.ckpt
 *.bin
+outputs/*.pt
+outputs/*.pth
+
+# ── Keep the outputs folder & logs tracked ──
+!outputs/
+!outputs/.gitkeep
+!outputs/*.csv
 
 # ── Training histories & experiment logs ──────────────────────────────────────
 # training_history*.csv
