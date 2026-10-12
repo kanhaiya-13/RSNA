@@ -900,12 +900,15 @@ def main() -> None:
         if not args.force_rerun and os.path.exists(ckpt_best) and os.path.exists(oof_best_f) and os.path.exists(hist_f):
             try:
                 h_df = pd.read_csv(hist_f)
-                b_auc = float(h_df["macro_auc"].max())
-                l_auc = float(h_df.iloc[-1]["macro_auc"])
-                fold_best_aucs[fold] = b_auc
-                fold_last_aucs[fold] = l_auc
-                logger.log(f"\n[Fold {fold} Already Completed] Best AUC: {b_auc:.6f} | Last AUC: {l_auc:.6f}. Skipping re-training.")
-                continue
+                if len(h_df) >= config["epochs"]:
+                    b_auc = float(h_df["macro_auc"].max())
+                    l_auc = float(h_df.iloc[-1]["macro_auc"])
+                    fold_best_aucs[fold] = b_auc
+                    fold_last_aucs[fold] = l_auc
+                    logger.log(f"\n[Fold {fold} Already Completed] Best AUC: {b_auc:.6f} | Last AUC: {l_auc:.6f}. Skipping re-training.")
+                    continue
+                else:
+                    logger.log(f"\n[Fold {fold}] Incomplete history ({len(h_df)}/{config['epochs']} epochs completed). Resuming from checkpoint...")
             except Exception as e:
                 logger.log(f"[Fold {fold}] Existing artifacts could not be read ({e}), re-training.")
 
