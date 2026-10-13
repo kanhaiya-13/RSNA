@@ -24,20 +24,34 @@ build/
 *.pth
 *.ckpt
 *.bin
-outputs/*.pt
-outputs/*.pth
+*.h5
+*.onnx
+outputs*/**/*.pt
+outputs*/**/*.pth
+outputs*/**/*.ckpt
 
 # ── Logs & Checkpoints ────────────────────────────────────────────────────────
 *.log
 .ipynb_checkpoints/
 *.ipynb
+wandb/
+runs/
 
-# ── Data (never commit raw datasets) ──────────────────────────────────────────
+# ── Data & Cache (never commit raw datasets or memmaps) ────────────────────────
 *.npz
 *.npy
+*.parquet
+*.feather
+.cache/
+cache/
+rsna_cache/
+
+# Ignore root/raw data CSVs, but allow tracking metrics, folds, and history CSVs
 *.csv
-!outputs/*.csv
-!requirements*.txt        # keep requirements CSVs if any
+!requirements*.txt
+!outputs*/**/*.csv
+!outputs*/*.csv
+!training_history*.csv
 
 # ── IDE & editor ──────────────────────────────────────────────────────────────
 .vscode/
